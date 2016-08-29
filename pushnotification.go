@@ -1,7 +1,9 @@
 package pushnotification
 
 import (
-	"encoding/json"
+	"errors"
+	"log"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
@@ -11,101 +13,164 @@ import (
 
 // Service is the main entry point into using this package.
 type Service struct {
-	AWSAccessKey         string
-	AWSAccessSecret      string
-	AWSSNSApplicationARN string
-	AWSRegion            string
+	Key         string
+	Secret      string
+	Region      string
+	GCM         string
+	APNS        string
+	APNSSandbox string
+	Windows     string
+	Platforms   map[string]string
+}
+
+type Device struct {
+	Token       string
+	Type        string
+	EndpointArn string
+	created     bool
+}
+
+func (device *Device) IsCreated() bool {
+	return device.created
 }
 
 // Data is the data of the sending pushnotification.
 type Data struct {
-	Alert *string     `json:"alert,omitempty"`
-	Sound *string     `json:"sound,omitempty"`
-	Data  interface{} `json:"custom_data"`
-	Badge *int        `json:"badge,omitempty"`
+	Alert   *string     `json:"alert,omitempty"`
+	Subject *string     `json:"subject,omitempty"`
+	Sound   *string     `json:"sound,omitempty"`
+	Data    interface{} `json:"custom_data"`
+	Badge   *int        `json:"badge,omitempty"`
 }
 
 // Send sends a push notification
-func (s *Service) Send(deviceToken string, data *Data) (err error) {
-
+func (service *Service) Send(device *Device, data *Data) (err error) {
 	svc := sns.New(session.New(&aws.Config{
-		Credentials: credentials.NewStaticCredentials(s.AWSAccessKey, s.AWSAccessSecret, ""),
-		Region:      aws.String(s.AWSRegion),
+		Credentials: credentials.NewStaticCredentials(service.Key, service.Secret, ""),
+		Region:      aws.String(service.Region),
 	}))
 
-	resp, err := svc.CreatePlatformEndpoint(&sns.CreatePlatformEndpointInput{
-		PlatformApplicationArn: aws.String(s.AWSSNSApplicationARN),
-		Token: aws.String(deviceToken),
-	})
+	message, err := newMessageJSON(data)
 	if err != nil {
+		log.Println("Message could not be created", err)
 		return
 	}
+	err = service.pushToDevice(svc, device, *data.Subject, message)
 
-	m, err := newMessageJSON(data)
+	// or get this extra info from an app
+	if device.Type == "ios" && len(service.APNSSandbox) > 0 {
+		sandBox := &Device{
+			Token: device.Token,
+			Type:  "_ios_sandbox_",
+		}
+		err = service.pushToDevice(svc, sandBox, *data.Subject, message)
+	}
+
+	return
+}
+
+func (service *Service) pushToDevice(svc *sns.SNS, device *Device, subject string, message string) (err error) {
+	err = service.getEndpointArn(svc, device)
 	if err != nil {
+		log.Println("Endpoint could not be retrieved", err)
 		return
 	}
 
 	input := &sns.PublishInput{
-		Message:          aws.String(m),
+		Subject:          aws.String(subject),
+		Message:          aws.String(message),
 		MessageStructure: aws.String("json"),
-		TargetArn:        aws.String(*resp.EndpointArn),
+		TargetArn:        aws.String(device.EndpointArn),
 	}
+
 	_, err = svc.Publish(input)
 	return
 }
 
-type message struct {
-	APNS        string `json:"APNS"`
-	APNSSandbox string `json:"APNS_SANDBOX"`
-	Default     string `json:"default"`
-	GCM         string `json:"GCM"`
-}
+// get platform ARN for device, create or update when needed
+func (service *Service) getEndpointArn(svc *sns.SNS, device *Device) (err error) {
+	// recommended approach with endpointArn
+	// https://mobile.awsblog.com/post/Tx223MJB0XKV9RU/Mobile-token-management-with-Amazon-SNS
 
-type iosPush struct {
-	APS Data `json:"aps"`
-}
+	if len(device.EndpointArn) == 0 {
+		device.EndpointArn, err = service.createEndpointArn(svc, device)
+		if err != nil {
+			return
+		}
+		device.created = true
+	}
 
-type gcmPush struct {
-	Message *string     `json:"message,omitempty"`
-	Custom  interface{} `json:"custom"`
-	Badge   *int        `json:"badge,omitempty"`
-}
-
-type gcmPushWrapper struct {
-	Data gcmPush `json:"data"`
-}
-
-func newMessageJSON(data *Data) (m string, err error) {
-	b, err := json.Marshal(iosPush{
-		APS: *data,
+	// get endpoint and check status etc
+	resp, err := svc.GetEndpointAttributes(&sns.GetEndpointAttributesInput{
+		EndpointArn: aws.String(device.EndpointArn),
 	})
 	if err != nil {
-		return
+		// endpoint is not there
+		device.EndpointArn, err = service.createEndpointArn(svc, device)
+		if err != nil {
+			return
+		}
+		device.created = true
+	} else if *resp.Attributes["Token"] == device.Token || *resp.Attributes["Enabled"] != "true" {
+		// update endpoint
+		params := &sns.SetEndpointAttributesInput{
+			Attributes: map[string]*string{
+				"Token":   aws.String(device.Token),
+				"Enabled": aws.String("true"),
+			},
+			EndpointArn: aws.String(device.EndpointArn),
+		}
+		_, err := svc.SetEndpointAttributes(params)
+		if err != nil {
+			log.Println("Endpoint could not be updated", err)
+		}
 	}
-	payload := string(b)
 
-	b, err = json.Marshal(gcmPushWrapper{
-		Data: gcmPush{
-			Message: data.Alert,
-			Custom:  data.Data,
-			Badge:   data.Badge,
-		},
-	})
-	if err != nil {
-		return
-	}
-	gcm := string(b)
+	return
+}
 
-	pushData, err := json.Marshal(message{
-		Default:     *data.Alert,
-		APNS:        payload,
-		APNSSandbox: payload,
-		GCM:         gcm,
-	})
+// create platform ARN for device
+func (service *Service) createEndpointArn(svc *sns.SNS, device *Device) (string, error) {
+	platform, err := service.getPlatform(device)
 	if err != nil {
-		return
+		log.Println(err)
+		return "", err
 	}
-	m = string(pushData)
+
+	resp, err := svc.CreatePlatformEndpoint(&sns.CreatePlatformEndpointInput{
+		PlatformApplicationArn: aws.String(platform),
+		Token: aws.String(device.Token),
+	})
+
+	if err != nil {
+		log.Println(err)
+		return "", err
+	}
+	return *resp.EndpointArn, err
+}
+
+// get application ARN for device type
+func (service *Service) getPlatform(device *Device) (platform string, err error) {
+	deviceType := strings.ToLower(device.Type)
+	if deviceType == "GCM" && len(service.GCM) > 0 {
+		platform = service.GCM
+	} else if deviceType == "ios" && len(service.APNS) > 0 {
+		platform = service.APNS
+	} else if deviceType == "_ios_sandbox_" && len(service.APNSSandbox) > 0 {
+		platform = service.APNSSandbox
+	} else if deviceType == "windows" && len(service.Windows) > 0 {
+		platform = service.Windows
+	} else {
+		notfound := true
+		if service.Platforms != nil {
+			if value, ok := service.Platforms[deviceType]; ok {
+				platform = value
+				notfound = false
+			}
+		}
+		if notfound {
+			err = errors.New("Device.Type " + device.Type + " not supported")
+		}
+	}
 	return
 }
