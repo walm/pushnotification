@@ -154,7 +154,9 @@ func (service *Service) createEndpointArn(svc *sns.SNS, device *Device) (string,
 // get application ARN for device type
 func (service *Service) getPlatform(device *Device) (platform string, err error) {
 	deviceType := strings.ToLower(device.Type)
-	if deviceType == "GCM" && len(service.GCM) > 0 {
+	if deviceType == "gcm" && len(service.GCM) > 0 {
+		platform = service.GCM
+	} else if deviceType == "android" && len(service.GCM) > 0 {
 		platform = service.GCM
 	} else if deviceType == "ios" && len(service.APNS) > 0 {
 		platform = service.APNS
