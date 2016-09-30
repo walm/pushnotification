@@ -77,12 +77,14 @@ func (service *Service) pushToDevice(svc *sns.SNS, device *Device, subject strin
 	}
 
 	input := &sns.PublishInput{
-		Subject:          aws.String(subject),
 		Message:          aws.String(message),
 		MessageStructure: aws.String("json"),
 		TargetArn:        aws.String(device.EndpointArn),
 	}
-
+	
+	if subject != "" {
+		input.Subject = aws.String(subject)
+	}
 	_, err = svc.Publish(input)
 	return
 }
