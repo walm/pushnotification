@@ -81,7 +81,7 @@ func (service *Service) pushToDevice(svc *sns.SNS, device *Device, subject strin
 		MessageStructure: aws.String("json"),
 		TargetArn:        aws.String(device.EndpointArn),
 	}
-	
+
 	if subject != "" {
 		input.Subject = aws.String(subject)
 	}

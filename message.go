@@ -25,14 +25,14 @@ type iosAlert struct {
 }
 
 type gcmPush struct {
-	Message *string     `json:"message,omitempty"`
-	Title   *string     `json:"title,omitempty"`
-	Custom  interface{} `json:"custom"`
-	Badge   *int        `json:"badge,omitempty"`
+	Body   *string     `json:"body,omitempty"`
+	Title  *string     `json:"title,omitempty"`
+	Custom interface{} `json:"custom"`
+	Badge  *int        `json:"badge,omitempty"`
 }
 
 type gcmPushWrapper struct {
-	Data gcmPush `json:"data"`
+	Notification gcmPush `json:"notification"`
 }
 
 func newMessageJSON(data *Data) (m string, err error) {
@@ -52,11 +52,11 @@ func newMessageJSON(data *Data) (m string, err error) {
 	payload := string(b)
 
 	b, err = json.Marshal(gcmPushWrapper{
-		Data: gcmPush{
-			Message: data.Alert,
-			Custom:  data.Data,
-			Badge:   data.Badge,
-			Title:   data.Subject,
+		Notification: gcmPush{
+			Body:   data.Alert,
+			Custom: data.Data,
+			Badge:  data.Badge,
+			Title:  data.Subject,
 		},
 	})
 	if err != nil {
